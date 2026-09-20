@@ -1,0 +1,34 @@
+# ============================================================
+# contest2026_163_Charks  .gitignore
+#
+# 主要用来忽略编译产物，避免误提交到参赛仓。
+# 注意：logs/ 下导出的 AI Coding 日志**必须提交**，不要忽略。
+# ============================================================
+
+# Build artifacts
+build/
+out/
+*.o
+*.a
+*.elf
+*.hex
+*.map
+
+# 本队补充
+*.log
+*.img
+tmp/
+
+# 凭据：绝不进仓（API Key 走板子 /data，私钥/证书不入库）
+*.pem
+*.key
+*.p12
+secrets.ini
+*secret*
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
