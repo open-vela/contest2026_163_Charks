@@ -1,0 +1,22 @@
+############################################################################
+# board/superchild/Make.defs
+#
+# 把 superchild 注册进 NuttX 的 APPS 构建。
+#
+# 为什么源码最终落在 packages/demos/superchild/
+# -------------------------------------------
+# `packages/demos/Make.defs` 里有一行
+#     include $(wildcard $(APPDIR)/packages/demos/*/Make.defs)
+# 也就是说**任何放进 packages/demos/ 子目录的应用都会被自动纳入**，
+# 同时 `packages/demos/Makefile` 的 Directory.mk 会自动收编子目录的
+# Kconfig。这是一个已经在这棵树上跑通的机制，不用改
+# packages/Make.defs、packages/Kconfig 这些"公共"文件。
+#
+# 放在 demos/ 下确实有点名不副实（这是产品主程序不是示例），
+# 但**少改公共文件 = 少一类只有在全新源码树上才会暴露的故障**，
+# 这个交换划算。目录名后面单独说明。
+############################################################################
+
+ifneq ($(CONFIG_SUPERCHILD),)
+CONFIGURED_APPS += $(APPDIR)/packages/demos/superchild
+endif

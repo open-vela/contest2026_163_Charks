@@ -1,0 +1,169 @@
+#
+# 小满（superchild）—— 开机即用的语音陪伴机器人（方案 C：板端自持）
+#
+# 与上一版的区别
+# =============
+# 上一版板子只跑"裸 TCP + 4 字节头"，TLS / WebSocket / JSON /
+# 采样率转换 / 情绪判定 / 安全策略全在 ECS 上的网关里。
+# 这一版**全部下沉到板子**，所以多了三个依赖（见下面的 select）：
+#
+#     CRYPTO_MBEDTLS     TLS。板子只信任内嵌的 DigiCert Global Root G2
+#     NETUTILS_CJSON     Realtime 的事件是嵌套 JSON，手写解析不划算
+#     NETUTILS_NTPCLIENT 证书有效期校验需要真实时间（rcS 里的 ntpcstart）
+#
+# 另一个独立应用 + 独立 Kconfig 的决定沿用上一版：挂在 ai_agent 的
+# LVGL 通道里出过事（不挂调用静态库不会链进来，镜像里根本没这个界面）。
+# 打开就是打开，不存在"编进去了但没人调用"。
+#
+
+menuconfig SUPERCHILD
+	bool "Superchild voice companion (小满)"
+	default n
+	depends on GRAPHICS_LVGL
+	select CRYPTO_MBEDTLS
+	select NETUTILS_CJSON
+	---help---
+		开机直接进入表情界面，**板子自己**连 StepFun Realtime 做实时
+		语音对话；表情随对话情绪与心情状态变化。不需要电脑、不需要网关。
+
+		依赖：GRAPHICS_LVGL（界面）、NET（TCP/TLS）、
+		      CRYPTO_MBEDTLS（TLS）、NETUTILS_CJSON（事件解析）、
+		      AW_TINY_ALSA_LIB / AUDIO（采集与播放）
+
+if SUPERCHILD
+
+config SUPERCHILD_PRIORITY
+	int "superchild task priority"
+	default 100
+
+config SUPERCHILD_STACKSIZE
+	int "superchild main (UI) task stack size"
+	default 32768
+	---help---
+		UI 任务同时是 LVGL 的宿主，栈要大一些。实测 32KB 有余量。
+
+config SUPERCHILD_RT_STACKSIZE
+	int "superchild realtime session task stack size"
+	default 20480
+	---help---
+		TLS 握手 + cJSON 解析都有一定栈深度，给小了会在握手的某个分支
+		上栈溢出 —— 而那个现象是随机的数据损坏，完全看不出是栈的问题。
+
+		注意：sc_rt.c 里几个大缓冲（会话结构约 70KB、TLS 约 20KB、
+		WebSocket 约 28KB）都做成 static 了，**不走栈**，
+		所以这里 20KB 指的是真正的调用栈。
+
+config SUPERCHILD_AUDIO_STACKSIZE
+	int "superchild audio task stack size"
+	default 4096
+
+config SUPERCHILD_UI_TICK_MS
+	int "UI frame interval (ms)"
+	default 60
+	---help---
+		表情动画的刷新间隔。ILI9341 走 SPI，60ms（约 16fps）已经够顺；
+		调到 20ms 会把显示总线占满，反而更卡。
+
+# ---------------------------------------------------------------------------
+# StepFun Realtime
+# ---------------------------------------------------------------------------
+
+config SUPERCHILD_API_HOST
+	string "API host (for SNI and certificate CN check)"
+	default "api.stepfun.com"
+	---help---
+		**这里填域名，不是 IP。** 它同时承担两件事：TLS 的 SNI，
+		以及证书主体（CN/SAN）的匹配。填 IP 会让两者都失败，
+		报错是 X509 校验失败，看起来像"证书不对"，其实是参数填错。
+
+config SUPERCHILD_API_IP
+	string "API IP (for the TCP connection)"
+	default "14.103.2.83"
+	---help---
+		TCP 实际连的地址。**建议填 IP 而不是域名**：开机后第一件事
+		就是连服务器，这时 DNS 往往还没就绪，而且板子上不一定编了
+		getaddrinfo。
+
+		代价：StepFun 走 CDN，IP 会变，写死的 IP 某天会失效 ——
+		那时表现为"TLS 连接超时"，看起来像证书或网络问题。
+		所以运行日志里会把实际连的 IP 打出来，排查时一眼能看到。
+
+config SUPERCHILD_API_PORT
+	int "API port"
+	default 443
+
+config SUPERCHILD_MODEL
+	string "Realtime model name"
+	default "stepaudio-3-realtime-preview"
+	---help---
+		⚠️ **这个名字是走 URL query 传的**（`/v1/realtime?model=<名>`），
+		不是放在 session.update 里。少传或放错位置，服务端回
+		`HTTP/1.1 400 Bad Request` —— 那个错误码看起来像
+		"WebSocket 握手写错了"，完全不会往"缺参数"上想。
+
+config SUPERCHILD_VOICE
+	string "Voice name"
+	default "linjiajiejie"
+	---help---
+		必须显式设置。服务端**默认音色是 `jingdiannvsheng`**
+		（实测 session.created 里回来的就是它），不设就一直是默认音色 ——
+		而现象只是"声音不对"，很容易被当成"模型音色就这样"。
+
+		注意 `step-audio-2*` 系列不认 `linjiajiejie`，会报
+		`voice linjiajiejie is not valid`。
+
+# ---------------------------------------------------------------------------
+# WiFi
+#
+# ⚠️ 这是"开机即对话"里最容易漏掉的一环。板子的 rcS.nsh 里虽然有
+#    开机联网脚本，但那条链是断的（见 board/superchild/sc_wifi.h 的长注释）：
+#      · /data/etc/wifi/wapi.conf 不在打包素材里 → 判断为假，脚本根本不跑
+#      · 就算跑，start_wifi.sh 用 grep + $(...) 取值，而板上两者都没有
+#
+#    真正可用的是官方 netinit 的编译期配置，也就是下面这两个 ——
+#    集成脚本会把它们同步到内核的 CONFIG_NETINIT_WAPI_SSID / PASSPHRASE。
+#
+#    填了这两项之后：开机 netinit 自动关联，**且不带 BSSID**
+#    （带了会被钉死在某个 AP 上，换网络必然连不上 —— 这是项目里
+#      已经踩过的坑，见 lichee 里那份写死 be:c1:a6:ff:d6:5e 的样例）。
+#
+#    ⚠️ 另外还要注意**加密方式**：板级 defconfig 原本把 WPA 写成了 TKIP，
+#       而现代路由器基本都是 WPA2-AES 专用 —— 会关联失败，且报错
+#       （No Assoc Network After Scan Done）看起来像信号问题。
+#       集成脚本已经把那几行删掉，交还 Kconfig 默认值（WPA2 + CCMP）。
+# ---------------------------------------------------------------------------
+
+config SUPERCHILD_WIFI_SSID
+	string "WiFi SSID"
+	default ""
+	---help---
+		留空表示不写进固件（此时靠 /data/etc/wifi/wapi.conf 或手工 wapi 命令）。
+
+config SUPERCHILD_WIFI_PASSPHRASE
+	string "WiFi passphrase"
+	default ""
+	---help---
+		与 SSID 成对出现。**不要提交进版本库** ——
+		集成脚本允许用环境变量 WIFI_SSID / WIFI_PASS 临时传入。
+
+config SUPERCHILD_WIFI_GUARD
+	bool "Retry WiFi association at boot"
+	default y
+	---help---
+		起一个后台任务，开机后检查 wlan0 有没有 IP，没有就周期性重试。
+		解决的是"板子和路由器同时上电、netinit 只关联一次就再也不重试"
+		这个很常见的场景。
+
+		同时把 WiFi 状态显示在屏幕角标上 ——
+		**"没联网"和"它不理我"的表象一样但排查方向完全不同**，
+		不摆出来就只能靠猜。
+
+config SUPERCHILD_AUTOSTART
+	bool "Start automatically at boot"
+	default y
+	---help---
+		打开后板级初始化里会创建一个任务来跑 superchild，
+		开机直接进表情界面，不需要敲命令。
+		调试时关掉它可以从 nsh 手工敲 `superchild` 启动。
+
+endif # SUPERCHILD

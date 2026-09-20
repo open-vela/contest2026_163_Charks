@@ -9,7 +9,10 @@
   <include name="openvela.xml"/>
 
   <project path="contest2026_163_Charks" name="contest2026_163_Charks">
-    <linkfile src="app/hello_app" dest="packages/demos/contest2026_163_hello_app"/>
+    <!-- 本队作品：板端实时语音对话应用（小满） -->
+    <linkfile src="app/superchild" dest="packages/demos/contest2026_163_superchild"/>
+
+    <!-- 组委会给的示例骨架，本队未使用（保留以便对照，可删） -->
     <linkfile src="quickapp/hello_quickapp" dest="packages/apps/contest2026_163_hello_quickapp"/>
     <linkfile src="board/contest_board" dest="vendor/openvela/boards/contest2026_163_board"/>
   </project>
